@@ -1,0 +1,142 @@
+╔══════════════════════════════════════════════════════════════════════╗
+║                                                                      ║
+║          🤖 MODELO DUAL-ENCODER PARA CLASIFICACIÓN DE AFDs           ║
+║                                                                      ║
+║                         ¡TODO LISTO PARA COLAB!                      ║
+║                                                                      ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+
+📁 ARCHIVOS CREADOS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🎯 PARA USAR EN COLAB (GPU):
+  ✅ acepten_colab.py          Script optimizado para GPU
+  ✅ dataset6000.csv            Dataset de 6000 AFDs
+  📋 CHECKLIST_COLAB.md         Guía paso a paso (EMPIEZA AQUÍ)
+  📘 COLAB_INSTRUCTIONS.md      Instrucciones detalladas
+  📝 quick_colab_setup.txt      Setup ultra-rápido (copiar/pegar)
+
+💻 PARA USAR LOCALMENTE (CPU):
+  ⚙️  acepten.py                Script completo
+  🧪 test_pipeline.py           Tests del sistema
+  ✓  test_quick.py              Verificación pre-Colab
+  📦 requirements.txt           Dependencias
+
+📚 DOCUMENTACIÓN:
+  📖 RESUMEN.md                 Resumen completo del proyecto
+  📄 README.md                  Documentación técnica
+
+
+🚀 QUICK START (3 PASOS):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1️⃣  LEE:     CHECKLIST_COLAB.md
+2️⃣  SUBE:    dataset6000.csv + acepten_colab.py a Colab
+3️⃣  EJECUTA: !python acepten_colab.py
+
+⏱️  Tiempo total: ~25 minutos en GPU T4
+
+
+📋 CHECKLIST RÁPIDO:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+□ Abrir Google Colab
+□ Activar GPU (Runtime → Change runtime type → GPU)
+□ Subir dataset6000.csv a /content/sample_data/
+□ Subir acepten_colab.py a /content/
+□ Ejecutar: !python acepten_colab.py
+□ ☕ Esperar ~25 minutos
+□ Descargar: best_model.pt, dataset_generated.csv, training_history.png
+
+
+🎯 LO QUE HACE EL MODELO:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Dada una cadena (ej: "ABC") y un autómata (dfa_id):
+
+  📊 Tarea 1: ¿La cadena pertenece a ESTE autómata?
+              (y1 → 0 o 1)
+
+  📊 Tarea 2: ¿La cadena es aceptada por MÚLTIPLES autómatas?
+              (y2 → 0 o 1)
+
+
+🏗️ ARQUITECTURA:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  Cadena "ABC"          AFD (matriz 16×12×16)
+       ↓                        ↓
+  Embedding              MLP Encoder
+       ↓                        ↓
+  BiGRU (2 capas)         h_afd (128)
+       ↓
+  h_str (128)
+       │                        │
+       ├────────┬───────────────┘
+       │        │
+       │    concat
+       │        │
+       │    ┌───┴───┐
+       │    │  MLP  │
+       │    └───┬───┘
+       │        │
+       │    y1: Pertenencia
+       │
+    ┌──┴──┐
+    │ MLP │
+    └──┬──┘
+       │
+   y2: Compartida
+
+  Total: ~1.9M parámetros
+
+
+📊 MÉTRICAS ESPERADAS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Tarea 1 (Pertenencia):
+  🥇 Muy Bueno:  Accuracy ≥ 0.95,  F1 ≥ 0.95
+  🥈 Bueno:      Accuracy ≥ 0.90,  F1 ≥ 0.90
+  🥉 Regular:    Accuracy ≥ 0.85
+
+Tarea 2 (Compartida):
+  🥇 Bueno:      F1 ≥ 0.90,  PR-AUC ≥ 0.90
+  🥈 Regular:    F1 ≥ 0.80,  PR-AUC ≥ 0.80
+
+
+📦 SALIDAS:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  best_model.pt            - Modelo entrenado (~7.5 MB)
+  dataset_generated.csv    - Dataset con y1, y2 (~12 MB)
+  training_history.png     - Gráficas de entrenamiento
+
+
+❓ ¿NECESITAS AYUDA?
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  🆘 Problemas al subir:    Ver COLAB_INSTRUCTIONS.md sección "Troubleshooting"
+  🔧 Cambiar hiperparámetros: Editar acepten_colab.py líneas 713, 734, 743
+  📖 Detalles técnicos:     Ver RESUMEN.md
+
+
+✅ VERIFICADO Y LISTO:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  ✅ Archivos presentes
+  ✅ Dependencias instaladas
+  ✅ Dataset validado (6000 AFDs)
+  ✅ Parser funcionando
+  ✅ Modelo funcional (test passed)
+
+
+🎉 TODO LISTO - SUBE A COLAB Y A ENTRENAR! 🚀
+
+
+╔══════════════════════════════════════════════════════════════════════╗
+║                                                                      ║
+║    📚 SIGUIENTE PASO: Abre CHECKLIST_COLAB.md y sigue los pasos     ║
+║                                                                      ║
+╚══════════════════════════════════════════════════════════════════════╝
+

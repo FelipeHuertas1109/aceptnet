@@ -1,0 +1,56 @@
+========================================
+SETUP RÁPIDO PARA GOOGLE COLAB
+========================================
+
+📋 COPIAR Y PEGAR EN COLAB (Celda 1):
+
+# Instalar dependencias
+!pip install -q torch pandas numpy scikit-learn matplotlib tqdm
+
+# Subir archivos
+from google.colab import files
+import shutil
+
+print("📤 Sube dataset6000.csv:")
+uploaded = files.upload()
+!mkdir -p /content/sample_data
+shutil.move('dataset6000.csv', '/content/sample_data/dataset6000.csv')
+
+print("\n📤 Sube acepten_colab.py:")
+uploaded = files.upload()
+
+# Verificar GPU
+import torch
+print(f"\n{'✅' if torch.cuda.is_available() else '⚠️'} GPU: {torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'No disponible'}")
+
+========================================
+
+📋 COPIAR Y PEGAR EN COLAB (Celda 2):
+
+# Ejecutar entrenamiento
+!python acepten_colab.py
+
+========================================
+
+📋 COPIAR Y PEGAR EN COLAB (Celda 3):
+
+# Descargar resultados
+from google.colab import files
+
+files.download('best_model.pt')
+files.download('dataset_generated.csv')
+files.download('training_history.png')
+
+print("✅ Archivos descargados!")
+
+========================================
+
+⏱️ TIEMPO ESTIMADO: 20-25 minutos en GPU T4
+
+🎯 NO OLVIDES:
+1. Runtime → Change runtime type → GPU
+2. Subir dataset6000.csv Y acepten_colab.py
+3. Descargar resultados antes de cerrar
+
+========================================
+
