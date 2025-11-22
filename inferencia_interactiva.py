@@ -42,31 +42,61 @@ class Predictor:
         if dfa_id < 0 or dfa_id >= len(self.parser.df):
             raise ValueError(f"dfa_id debe estar entre 0 y {len(self.parser.df)-1}")
         
-        # Obtener features del AFD
-        afd_features = torch.tensor(
-            self.parser.get_afd_features(dfa_id), 
-            dtype=torch.float32
-        ).unsqueeze(0).to(self.device)
+        # Obtener información del AFD
+        row = self.parser.df.iloc[dfa_id]
+        afd_info = {
+            'Regex': row['Regex'],
+            'Alfabeto': row['Alfabeto'],
+            'Estados': row['Estados'],
+            'Aceptacion': row['Estados de aceptación'],
+        }
+
+        # 🔹 REGLA LÓGICA: Verificar alfabeto del AFD
+        alfabeto = set(row['Alfabeto'].split())
         
-        # Tokenizar cadena
-        if string == '<EPS>' or string == '':
-            tokens = []
+        # Si la cadena tiene símbolos fuera del alfabeto, Y1 = 0 automáticamente
+        alphabet_mismatch = False
+        if string not in ("", "<EPS>"):
+            for ch in string:
+                if ch not in alfabeto:
+                    alphabet_mismatch = True
+                    break
+        
+        if alphabet_mismatch:
+            # No pertenece por regla lógica (símbolos fuera del alfabeto)
+            y1_prob = 0.0
+            y1_pred = False
+            y2_prob = 0.0
+            y2_pred = False
         else:
-            tokens = [CHAR_TO_IDX.get(c, 12) for c in string if c in CHAR_TO_IDX]
-        
-        # Preparar tensors
-        if len(tokens) == 0:
-            string_tokens = torch.zeros((1, 1), dtype=torch.long).to(self.device)
-            string_lengths = torch.tensor([0], dtype=torch.long).to(self.device)
-        else:
-            string_tokens = torch.tensor([tokens], dtype=torch.long).to(self.device)
-            string_lengths = torch.tensor([len(tokens)], dtype=torch.long).to(self.device)
-        
-        # Predecir
-        with torch.no_grad():
-            y1_prob, y2_prob = self.model(string_tokens, string_lengths, afd_features)
-            y1_prob = y1_prob.item()
-            y2_prob = y2_prob.item()
+            # Obtener features del AFD
+            afd_features = torch.tensor(
+                self.parser.get_afd_features(dfa_id),
+                dtype=torch.float32
+            ).unsqueeze(0).to(self.device)
+            
+            # Tokenizar cadena
+            if string == '<EPS>' or string == '':
+                tokens = []
+            else:
+                tokens = [CHAR_TO_IDX.get(c, 12) for c in string if c in CHAR_TO_IDX]
+            
+            # Preparar tensors
+            if len(tokens) == 0:
+                string_tokens = torch.zeros((1, 1), dtype=torch.long).to(self.device)
+                string_lengths = torch.tensor([0], dtype=torch.long).to(self.device)
+            else:
+                string_tokens = torch.tensor([tokens], dtype=torch.long).to(self.device)
+                string_lengths = torch.tensor([len(tokens)], dtype=torch.long).to(self.device)
+            
+            # Predecir con el modelo
+            with torch.no_grad():
+                y1_prob, y2_prob = self.model(string_tokens, string_lengths, afd_features)
+                y1_prob = y1_prob.item()
+                y2_prob = y2_prob.item()
+            
+            y1_pred = y1_prob > 0.5
+            y2_pred = y2_prob > 0.5
         
         # Simular AFD para comparar (ground truth si es posible)
         try:
@@ -78,10 +108,12 @@ class Predictor:
             'dfa_id': dfa_id,
             'string': string,
             'y1_prob': y1_prob,
-            'y1_pred': y1_prob > 0.5,
+            'y1_pred': y1_pred,
             'y1_ground_truth': ground_truth,
+            'y1_alphabet_mismatch': alphabet_mismatch,
             'y2_prob': y2_prob,
-            'y2_pred': y2_prob > 0.5,
+            'y2_pred': y2_pred,
+            'afd_info': afd_info,
         }
     
     def mostrar_info_afd(self, dfa_id: int):
@@ -161,8 +193,14 @@ def modo_interactivo():
                 print("\n" + "="*70)
                 print("📊 RESULTADO")
                 print("="*70)
-                print(f"AFD: {result['dfa_id']}")
-                print(f"Cadena: '{result['string']}'")
+                afd_info = result.get('afd_info', {})
+                print(f"AFD seleccionado: {result['dfa_id']}")
+                if afd_info:
+                    print(f"  Regex: {afd_info.get('Regex', 'N/A')}")
+                    print(f"  Alfabeto: {afd_info.get('Alfabeto', 'N/A')}")
+                    print(f"  Estados: {afd_info.get('Estados', 'N/A')}")
+                    print(f"  Aceptación: {afd_info.get('Aceptacion', 'N/A')}")
+                print(f"\nCadena: '{result['string']}'")
                 print()
                 print(f"🎯 Y1 (Pertenencia a este AFD):")
                 print(f"   Probabilidad: {result['y1_prob']:.4f}")
@@ -172,6 +210,7 @@ def modo_interactivo():
                     correct = result['y1_pred'] == result['y1_ground_truth']
                     icon = "✅" if correct else "❌"
                     print(f"   {icon} Ground Truth: {'SÍ' if result['y1_ground_truth'] else 'NO'}")
+                    print(f"   ▶ Simulación del AFD: {'ACEPTA' if result['y1_ground_truth'] else 'RECHAZA'} la cadena")
                 
                 print()
                 print(f"💫 Y2 (Compartida con otros AFDs):")

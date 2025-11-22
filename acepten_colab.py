@@ -30,6 +30,21 @@ MAX_STATES = 16
 NUM_SYMBOLS = len(ALPHABET)
 PAD_IDX = len(ALPHABET)
 
+# Configuración base para controlar regularizaciones desde un solo lugar
+TRAIN_CONFIG = {
+    'pos_samples_per_dfa': 50,   # ⬆️ Aumentado de 25 a 50
+    'neg_samples_per_dfa': 80,   # ⬆️ Aumentado de 40 a 80
+    'augment_positives': True,   # 🆕 Generar variaciones de positivos
+    'augment_factor': 2,         # 🆕 Multiplicador de augmentación
+    'label_smoothing': 0.0,      # Sin smoothing: Y1 es lógica exacta (0 o 1)
+    'lambda1': 1.0,              # Peso de Y1 (pertenencia)
+    'lambda2': 0.3,              # Peso de Y2 (compartida) - menor prioridad
+    'batch_size': 128,
+    'num_epochs': 40,
+    'early_stop_patience': 5,
+    'early_stop_min_delta': 1e-3
+}
+
 
 class AFDParser:
     """Parser para extraer información estructurada de los AFDs del dataset"""
@@ -139,25 +154,127 @@ class StringDatasetGenerator:
     
     def __init__(self, parser: AFDParser):
         self.parser = parser
+        self.generated_cache = defaultdict(set)  # Cache para evitar duplicados
         
-    def generate_positive_samples(self, dfa_id: int, max_samples: int = 50) -> List[str]:
-        """Genera cadenas aceptadas por el AFD usando la columna 'Clase'"""
+    def get_clase_samples(self, dfa_id: int) -> Tuple[List[str], List[str]]:
+        """Extrae positivos y negativos de la columna Clase"""
         row = self.parser.df.iloc[dfa_id]
         clase = row['Clase']
         
         if pd.isna(clase):
-            return []
+            return [], []
             
         try:
             clase_dict = json.loads(clase.replace("'", '"'))
-            accepted = [k for k, v in clase_dict.items() if v is True]
-            return accepted[:max_samples]
+            pos = [k for k, v in clase_dict.items() if v is True]
+            neg = [k for k, v in clase_dict.items() if v is False]
+            return pos, neg
         except:
+            return [], []
+    
+    def augment_positive_string(self, dfa_id: int, base_string: str, alfabeto: List[str], 
+                                max_attempts: int = 10) -> List[str]:
+        """
+        Genera variaciones de una cadena positiva que también sean aceptadas.
+        Estrategias:
+        1. Concatenar con otras cadenas positivas
+        2. Insertar subcadenas que mantengan la aceptación
+        3. Repetir patrones
+        """
+        variations = []
+        
+        if base_string in ("<EPS>", ""):
+            # Para cadena vacía, generar cadenas simples del alfabeto
+            for sym in alfabeto[:3]:  # Probar primeros 3 símbolos
+                if self.parser.simulate_afd(dfa_id, sym):
+                    variations.append(sym)
+            return variations
+        
+        attempts = 0
+        while len(variations) < 3 and attempts < max_attempts:
+            attempts += 1
+            strategy = np.random.choice(['concat', 'insert', 'repeat'])
+            
+            if strategy == 'concat' and len(base_string) < 8:
+                # Concatenar con símbolos del alfabeto
+                suffix = np.random.choice(alfabeto, size=np.random.randint(1, 3))
+                candidate = base_string + ''.join(suffix)
+                
+            elif strategy == 'insert' and len(base_string) > 1:
+                # Insertar símbolo en posición aleatoria
+                pos = np.random.randint(0, len(base_string) + 1)
+                sym = np.random.choice(alfabeto)
+                candidate = base_string[:pos] + sym + base_string[pos:]
+                
+            elif strategy == 'repeat' and len(base_string) < 5:
+                # Repetir la cadena
+                candidate = base_string * 2
+                
+            else:
+                continue
+            
+            # Verificar que sea aceptada y no duplicada
+            if len(candidate) <= 10 and candidate not in variations:
+                if self.parser.simulate_afd(dfa_id, candidate):
+                    variations.append(candidate)
+        
+        return variations
+    
+    def generate_boundary_negatives(self, dfa_id: int, positive_strings: List[str], 
+                                    alfabeto: List[str], num_samples: int = 20) -> List[str]:
+        """
+        Genera negativos cercanos a la frontera de decisión.
+        Toma cadenas positivas y las modifica ligeramente para que sean rechazadas.
+        """
+        negatives = []
+        attempts = 0
+        max_attempts = num_samples * 10
+        
+        if not positive_strings:
             return []
+        
+        while len(negatives) < num_samples and attempts < max_attempts:
+            attempts += 1
+            base = np.random.choice(positive_strings)
+            
+            if base in ("<EPS>", ""):
+                # Para vacío, probar símbolos individuales
+                candidate = np.random.choice(alfabeto)
+            else:
+                strategy = np.random.choice(['substitute', 'delete', 'append'])
+                
+                if strategy == 'substitute' and len(base) > 0:
+                    # Sustituir un caracter
+                    pos = np.random.randint(0, len(base))
+                    new_char = np.random.choice(alfabeto)
+                    candidate = base[:pos] + new_char + base[pos+1:]
+                    
+                elif strategy == 'delete' and len(base) > 1:
+                    # Eliminar un caracter
+                    pos = np.random.randint(0, len(base))
+                    candidate = base[:pos] + base[pos+1:]
+                    
+                elif strategy == 'append':
+                    # Agregar sufijo
+                    suffix = ''.join(np.random.choice(alfabeto, size=np.random.randint(1, 3)))
+                    candidate = base + suffix
+                    
+                else:
+                    continue
+            
+            # Verificar que sea rechazada y no duplicada
+            if candidate not in negatives and len(candidate) <= 10:
+                if not self.parser.simulate_afd(dfa_id, candidate):
+                    negatives.append(candidate)
+        
+        return negatives
     
     def generate_negative_samples(self, dfa_id: int, num_samples: int = 50, 
-                                  max_len: int = 5) -> List[str]:
-        """Genera cadenas aleatorias que no son aceptadas"""
+                                  max_len: int = 5, mismatch_ratio: float = 0.4) -> List[str]:
+        """
+        Genera cadenas negativas aleatorias.
+        mismatch_ratio: proporción de negativos que incluyen símbolos fuera del alfabeto del AFD
+        """
         row = self.parser.df.iloc[dfa_id]
         alfabeto_str = row['Alfabeto']
         
@@ -165,31 +282,84 @@ class StringDatasetGenerator:
             return []
             
         simbolos = alfabeto_str.split()
+        global_symbols = ALPHABET
+        extra = [c for c in global_symbols if c not in simbolos]  # símbolos prohibidos
+        
         negative_samples = []
         attempts = 0
-        max_attempts = num_samples * 10
+        max_attempts = num_samples * 20
         
         while len(negative_samples) < num_samples and attempts < max_attempts:
             attempts += 1
             length = np.random.randint(1, max_len + 1)
-            string = ''.join(np.random.choice(simbolos, size=length))
+            
+            # Parte de las veces, forzar un símbolo fuera del alfabeto
+            if extra and np.random.rand() < mismatch_ratio:
+                # Al menos un caracter fuera del alfabeto
+                if length == 1:
+                    chars = [np.random.choice(extra)]
+                else:
+                    chars = [np.random.choice(global_symbols) for _ in range(length)]
+                    pos_extra = np.random.randint(0, length)
+                    chars[pos_extra] = np.random.choice(extra)
+            else:
+                # Negativos solo con símbolos válidos
+                chars = [np.random.choice(simbolos) for _ in range(length)]
+            
+            string = ''.join(chars)
             
             if not self.parser.simulate_afd(dfa_id, string):
-                negative_samples.append(string)
+                if string not in negative_samples:
+                    negative_samples.append(string)
         
         return negative_samples
     
     def generate_full_dataset(self, pos_samples_per_dfa: int = 50,
-                             neg_samples_per_dfa: int = 50) -> pd.DataFrame:
-        """Genera dataset completo con pares (dfa_id, string, label)"""
+                             neg_samples_per_dfa: int = 50,
+                             augment_positives: bool = True,
+                             augment_factor: int = 2) -> pd.DataFrame:
+        """
+        Genera dataset completo con pares (dfa_id, string, label)
+        
+        Args:
+            pos_samples_per_dfa: Muestras positivas base por AFD
+            neg_samples_per_dfa: Muestras negativas por AFD
+            augment_positives: Si True, genera variaciones de positivos
+            augment_factor: Multiplicador de augmentación (ej: 2 = duplica positivos)
+        """
         data = []
         num_dfas = len(self.parser.df)
         
         print(f"Generando dataset desde {num_dfas} AFDs...")
+        if augment_positives:
+            print(f"   🔄 Augmentación activada (factor={augment_factor}x)")
         
         for dfa_id in tqdm(range(num_dfas), desc="Procesando AFDs"):
-            # Muestras positivas
-            pos_strings = self.generate_positive_samples(dfa_id, pos_samples_per_dfa)
+            row = self.parser.df.iloc[dfa_id]
+            alfabeto = row['Alfabeto'].split() if not pd.isna(row['Alfabeto']) else []
+            
+            # 1) Obtener positivos y negativos desde Clase
+            pos_all, neg_all = self.get_clase_samples(dfa_id)
+            np.random.shuffle(pos_all)
+            np.random.shuffle(neg_all)
+            
+            # 2) Muestras positivas base
+            pos_strings = pos_all[:pos_samples_per_dfa]
+            
+            # 3) 🆕 AUGMENTACIÓN DE POSITIVOS
+            if augment_positives and pos_strings and alfabeto:
+                augmented = []
+                target_augmented = min(len(pos_strings) * (augment_factor - 1), 50)
+                
+                for base_string in pos_strings[:10]:  # Augmentar las primeras 10
+                    variations = self.augment_positive_string(dfa_id, base_string, alfabeto)
+                    augmented.extend(variations)
+                    if len(augmented) >= target_augmented:
+                        break
+                
+                pos_strings = pos_strings + augmented[:target_augmented]
+            
+            # Agregar positivos al dataset
             for string in pos_strings:
                 data.append({
                     'dfa_id': dfa_id,
@@ -197,17 +367,45 @@ class StringDatasetGenerator:
                     'label': 1
                 })
             
-            # Muestras negativas
-            neg_strings = self.generate_negative_samples(dfa_id, neg_samples_per_dfa)
-            for string in neg_strings:
+            # 4) Negativos desde Clase
+            neg_strings = neg_all[:neg_samples_per_dfa // 2]  # Reservar mitad para otros
+            
+            # 5) 🆕 NEGATIVOS DE FRONTERA (cercanos a positivos)
+            if pos_strings and alfabeto:
+                boundary_negs = self.generate_boundary_negatives(
+                    dfa_id, 
+                    pos_strings, 
+                    alfabeto, 
+                    num_samples=neg_samples_per_dfa // 4
+                )
+                neg_strings.extend(boundary_negs)
+            
+            # 6) Completar con negativos aleatorios (incluyendo símbolos fuera del alfabeto)
+            if len(neg_strings) < neg_samples_per_dfa:
+                extra = self.generate_negative_samples(
+                    dfa_id,
+                    num_samples=neg_samples_per_dfa - len(neg_strings),
+                    mismatch_ratio=0.4  # 40% con símbolos fuera del alfabeto
+                )
+                neg_strings.extend(extra)
+            
+            # Agregar negativos al dataset
+            for string in neg_strings[:neg_samples_per_dfa]:
                 data.append({
                     'dfa_id': dfa_id,
-                    'string': string,
+                    'string': string if string != "" else "<EPS>",
                     'label': 0
                 })
         
         df = pd.DataFrame(data)
-        print(f"✓ Dataset generado: {len(df)} ejemplos")
+        print(f"✓ Dataset generado: {len(df):,} ejemplos")
+        
+        # Estadísticas
+        pos_count = (df['label'] == 1).sum()
+        neg_count = (df['label'] == 0).sum()
+        print(f"   📊 Positivos: {pos_count:,} | Negativos: {neg_count:,}")
+        print(f"   📈 Promedio por AFD: {len(df) / num_dfas:.1f} ejemplos")
+        
         return df
     
     def compute_shared_label(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -260,6 +458,31 @@ class AFDStringDataset(Dataset):
             'y1': torch.tensor(y1, dtype=torch.float32),
             'y2': torch.tensor(y2, dtype=torch.float32)
         }
+
+
+def smooth_targets(targets: torch.Tensor, epsilon: float) -> torch.Tensor:
+    """Aplica label smoothing para mitigar sobreajuste extremo."""
+    if epsilon <= 0:
+        return targets
+    return targets * (1 - epsilon) + 0.5 * epsilon
+
+
+class EarlyStopping:
+    """Detiene entrenamiento cuando la mejora en validación se estanca."""
+
+    def __init__(self, patience: int = 5, min_delta: float = 1e-3):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.best_loss = float('inf')
+        self.counter = 0
+
+    def step(self, val_loss: float) -> bool:
+        if val_loss + self.min_delta < self.best_loss:
+            self.best_loss = val_loss
+            self.counter = 0
+            return False
+        self.counter += 1
+        return self.counter >= self.patience
 
 
 def collate_fn(batch):
@@ -387,25 +610,36 @@ class Trainer:
     """Entrenador del modelo dual-task optimizado para GPU"""
     
     def __init__(self, model, train_loader, val_loader, 
-                 lambda1=1.0, lambda2=1.0, lr=0.001, device='cuda'):
+                 lambda1=1.0, lambda2=1.0, lr=0.001, device='cuda',
+                 label_smoothing: float = 0.0,
+                 early_stop_patience: int = 5,
+                 early_stop_min_delta: float = 1e-3):
         self.model = model.to(device)
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.lambda1 = lambda1
         self.lambda2 = lambda2
         self.device = device
+        self.label_smoothing = label_smoothing
         
         self.optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer, mode='min', patience=3, factor=0.5
         )
         self.criterion = nn.BCELoss()
+        self.early_stopping = EarlyStopping(
+            patience=early_stop_patience,
+            min_delta=early_stop_min_delta
+        )
         
         self.history = {
             'train_loss': [], 'val_loss': [],
             'train_acc_y1': [], 'val_acc_y1': [],
             'train_acc_y2': [], 'val_acc_y2': []
         }
+
+    def _prepare_targets(self, targets: torch.Tensor) -> torch.Tensor:
+        return smooth_targets(targets, self.label_smoothing)
     
     def train_epoch(self):
         self.model.train()
@@ -423,8 +657,11 @@ class Trainer:
             
             y1_hat, y2_hat = self.model(string_tokens, string_lengths, afd_features)
             
-            loss1 = self.criterion(y1_hat, y1_true)
-            loss2 = self.criterion(y2_hat, y2_true)
+            y1_targets = self._prepare_targets(y1_true)
+            y2_targets = self._prepare_targets(y2_true)
+            
+            loss1 = self.criterion(y1_hat, y1_targets)
+            loss2 = self.criterion(y2_hat, y2_targets)
             loss = self.lambda1 * loss1 + self.lambda2 * loss2
             
             self.optimizer.zero_grad()
@@ -462,8 +699,11 @@ class Trainer:
                 
                 y1_hat, y2_hat = self.model(string_tokens, string_lengths, afd_features)
                 
-                loss1 = self.criterion(y1_hat, y1_true)
-                loss2 = self.criterion(y2_hat, y2_true)
+                y1_targets = self._prepare_targets(y1_true)
+                y2_targets = self._prepare_targets(y2_true)
+                
+                loss1 = self.criterion(y1_hat, y1_targets)
+                loss2 = self.criterion(y2_hat, y2_targets)
                 loss = self.lambda1 * loss1 + self.lambda2 * loss2
                 
                 total_loss += loss.item()
@@ -506,6 +746,68 @@ class Trainer:
                   f"Train Loss: {train_loss:.4f} Y1: {train_acc_y1:.4f} Y2: {train_acc_y2:.4f} | "
                   f"Val Loss: {val_loss:.4f} Y1: {val_acc_y1:.4f} Y2: {val_acc_y2:.4f}")
 
+            if self.early_stopping.step(val_loss):
+                print("⏹️  Early stopping activado: la pérdida de validación no mejora.")
+                break
+
+
+def find_best_threshold(model, loader, device, task: str):
+    """Busca el umbral que maximiza F1 para la tarea especificada."""
+    model.eval()
+    scores, labels = [], []
+
+    with torch.no_grad():
+        for batch in loader:
+            string_tokens = batch['string_tokens'].to(device)
+            string_lengths = batch['string_lengths'].to(device)
+            afd_features = batch['afd_features'].to(device)
+
+            y1_hat, y2_hat = model(string_tokens, string_lengths, afd_features)
+
+            if task == 'y1':
+                scores.extend(y1_hat.cpu().numpy())
+                labels.extend(batch['y1'].cpu().numpy())
+            else:
+                scores.extend(y2_hat.cpu().numpy())
+                labels.extend(batch['y2'].cpu().numpy())
+
+    if not scores:
+        return 0.5, 0.0
+
+    scores = np.array(scores)
+    labels = np.array(labels).astype(int)
+    candidate_thresholds = np.linspace(0.2, 0.8, 61)
+
+    best_threshold, best_f1 = 0.5, 0.0
+    for threshold in candidate_thresholds:
+        preds = (scores >= threshold).astype(int)
+        f1 = f1_score(labels, preds, zero_division=0)
+        if f1 > best_f1:
+            best_f1 = f1
+            best_threshold = float(threshold)
+
+    return best_threshold, best_f1
+
+
+def calibrate_thresholds(model, val_loader, device):
+    """Calibra y guarda los mejores umbrales para Y1 y Y2 usando validación."""
+    print("\n🔧 Calibrando umbrales con validación...")
+    thresholds = {}
+
+    y1_th, y1_f1 = find_best_threshold(model, val_loader, device, task='y1')
+    print(f"   Y1 → umbral óptimo: {y1_th:.3f} (F1={y1_f1:.3f})")
+    thresholds['y1'] = round(y1_th, 4)
+
+    y2_th, y2_f1 = find_best_threshold(model, val_loader, device, task='y2')
+    print(f"   Y2 → umbral óptimo: {y2_th:.3f} (F1={y2_f1:.3f})")
+    thresholds['y2'] = round(y2_th, 4)
+
+    with open('thresholds.json', 'w') as f:
+        json.dump(thresholds, f, indent=2)
+    print("   ✓ Umbrales guardados en 'thresholds.json'")
+
+    return thresholds
+
 
 class Evaluator:
     """Evaluador completo con métricas detalladas"""
@@ -515,11 +817,14 @@ class Evaluator:
         self.test_loader = test_loader
         self.device = device
     
-    def evaluate(self):
+    def evaluate(self, thresholds=None):
         self.model.eval()
         
         all_y1_pred, all_y1_true, all_y1_scores = [], [], []
         all_y2_pred, all_y2_true, all_y2_scores = [], [], []
+
+        y1_threshold = thresholds.get('y1', 0.5) if thresholds else 0.5
+        y2_threshold = thresholds.get('y2', 0.5) if thresholds else 0.5
         
         with torch.no_grad():
             for batch in tqdm(self.test_loader, desc="Evaluando"):
@@ -533,8 +838,8 @@ class Evaluator:
                 
                 y1_scores = y1_hat.cpu().numpy()
                 y2_scores = y2_hat.cpu().numpy()
-                y1_pred = (y1_scores > 0.5).astype(int)
-                y2_pred = (y2_scores > 0.5).astype(int)
+                y1_pred = (y1_scores >= y1_threshold).astype(int)
+                y2_pred = (y2_scores >= y2_threshold).astype(int)
                 
                 all_y1_pred.extend(y1_pred)
                 all_y1_true.extend(y1_true)
@@ -653,7 +958,12 @@ def main():
     # 2. Generar dataset
     print("2️⃣  Generando dataset...")
     generator = StringDatasetGenerator(parser)
-    df = generator.generate_full_dataset(pos_samples_per_dfa=30, neg_samples_per_dfa=30)
+    df = generator.generate_full_dataset(
+        pos_samples_per_dfa=TRAIN_CONFIG['pos_samples_per_dfa'],
+        neg_samples_per_dfa=TRAIN_CONFIG['neg_samples_per_dfa'],
+        augment_positives=TRAIN_CONFIG['augment_positives'],
+        augment_factor=TRAIN_CONFIG['augment_factor']
+    )
     print()
     
     # 3. Calcular y2
@@ -678,7 +988,7 @@ def main():
     
     # 5. Dataloaders
     print("5️⃣  Creando dataloaders...")
-    batch_size = 128  # Mayor batch size para GPU
+    batch_size = TRAIN_CONFIG['batch_size']  # Mayor batch size para GPU
     
     train_dataset = AFDStringDataset(train_df, parser)
     val_dataset = AFDStringDataset(val_df, parser)
@@ -700,15 +1010,27 @@ def main():
     
     # 7. Entrenar
     print("7️⃣  Entrenando...")
-    trainer = Trainer(model, train_loader, val_loader, device=device, lr=0.001)
-    trainer.train(num_epochs=30)
+    trainer = Trainer(
+        model,
+        train_loader,
+        val_loader,
+        lambda1=TRAIN_CONFIG['lambda1'],
+        lambda2=TRAIN_CONFIG['lambda2'],
+        device=device,
+        lr=0.001,
+        label_smoothing=TRAIN_CONFIG['label_smoothing'],
+        early_stop_patience=TRAIN_CONFIG['early_stop_patience'],
+        early_stop_min_delta=TRAIN_CONFIG['early_stop_min_delta']
+    )
+    trainer.train(num_epochs=TRAIN_CONFIG['num_epochs'])
     print("\n✅ Entrenamiento completado!\n")
     
-    # 8. Evaluar
-    print("8️⃣  Evaluando en test set...")
+    # 8. Calibrar umbrales y evaluar
+    print("8️⃣  Calibrando umbrales y evaluando en test set...")
     model.load_state_dict(torch.load('best_model.pt'))
+    thresholds = calibrate_thresholds(model, val_loader, device=device)
     evaluator = Evaluator(model, test_loader, device=device)
-    metrics = evaluator.evaluate()
+    metrics = evaluator.evaluate(thresholds=thresholds)
     print()
     
     # 9. Visualizar
