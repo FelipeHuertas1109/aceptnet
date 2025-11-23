@@ -5,13 +5,16 @@ Permite testear el modelo con cadenas y AFDs personalizados
 
 import torch
 import pandas as pd
+import json
+import os
 from acepten import AFDParser, DualEncoderModel, CHAR_TO_IDX
 
 
 class Predictor:
     """Clase para hacer predicciones con el modelo entrenado"""
     
-    def __init__(self, model_path='result/best_model.pt', dataset_path='dataset6000.csv'):
+    def __init__(self, model_path='result/best_model.pt', dataset_path='dataset6000.csv', 
+                 thresholds_path=None):
         print("🔄 Cargando modelo y parser...")
         
         # Cargar modelo
@@ -24,6 +27,16 @@ class Predictor:
         
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.model = self.model.to(self.device)
+        
+        # Cargar umbrales calibrados si existen
+        self.thresholds = {'y1': 0.5, 'y2': 0.5}  # Valores por defecto
+        if thresholds_path and os.path.exists(thresholds_path):
+            try:
+                with open(thresholds_path, 'r') as f:
+                    self.thresholds = json.load(f)
+                print(f"✅ Umbrales calibrados cargados: Y1={self.thresholds['y1']}, Y2={self.thresholds['y2']}")
+            except:
+                print("⚠️  No se pudieron cargar umbrales, usando 0.5 por defecto")
         
         print(f"✅ Listo! Device: {self.device}")
     
@@ -95,8 +108,8 @@ class Predictor:
                 y1_prob = y1_prob.item()
                 y2_prob = y2_prob.item()
             
-            y1_pred = y1_prob > 0.5
-            y2_pred = y2_prob > 0.5
+            y1_pred = y1_prob >= self.thresholds['y1']
+            y2_pred = y2_prob >= self.thresholds['y2']
         
         # Simular AFD para comparar (ground truth si es posible)
         try:
@@ -167,17 +180,44 @@ def modo_interactivo():
     print("╚" + "="*68 + "╝")
     print()
     
-    predictor = Predictor()
+    # Detectar automáticamente el mejor modelo disponible
+    model_options = [
+        ('result-negative-positive/best_model (1).pt', 'result-negative-positive/thresholds.json', '🆕 Modelo Mejorado (con augmentación)'),
+        ('result/best_model.pt', None, '📦 Modelo Original'),
+    ]
+    
+    print("🔍 Modelos disponibles:")
+    available_models = []
+    for i, (model_path, thresh_path, desc) in enumerate(model_options, 1):
+        if os.path.exists(model_path):
+            available_models.append((model_path, thresh_path, desc))
+            print(f"   {i}. {desc}")
+    
+    if not available_models:
+        print("❌ No se encontró ningún modelo. Asegúrate de tener best_model.pt")
+        return
+    
+    print()
+    if len(available_models) > 1:
+        choice = input(f"Selecciona modelo (1-{len(available_models)}) [1]: ").strip()
+        model_idx = int(choice) - 1 if choice.isdigit() and 1 <= int(choice) <= len(available_models) else 0
+    else:
+        model_idx = 0
+    
+    model_path, thresh_path, desc = available_models[model_idx]
+    print(f"✅ Usando: {desc}\n")
+    
+    predictor = Predictor(model_path=model_path, thresholds_path=thresh_path)
     
     while True:
         print("\n" + "="*70)
         print("🎮 MENÚ PRINCIPAL")
         print("="*70)
-        print("1. Predecir para una cadena y AFD específico")
-        print("2. Probar múltiples cadenas contra un AFD")
-        print("3. Ver información de un AFD")
-        print("4. Ejemplos predefinidos")
-        print("5. Salir")
+        print("1. 🎯 Probar cadena con un AFD (por ID)")
+        print("2. 🔍 Buscar AFD por regex y probar cadena")
+        print("3. 📋 Ver información de un AFD")
+        print("4. 🎲 Ejemplos predefinidos")
+        print("5. 🚪 Salir")
         print()
         
         opcion = input("Selecciona una opción (1-5): ").strip()
